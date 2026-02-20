@@ -335,10 +335,10 @@ static bool handle_events(MediaRenderer&  mr,
         case SDLK_ESCAPE:
             if (!ev.key.repeat) return false;
             break;
-        case SDLK_N: case SDLK_PAGEDOWN:
+        case SDLK_N:
             if (!ev.key.repeat) advance = +1;
             break;
-        case SDLK_P: case SDLK_PAGEUP:
+        case SDLK_P:
             if (!ev.key.repeat) advance = -1;
             break;
 
@@ -373,6 +373,9 @@ static bool handle_events(MediaRenderer&  mr,
             break;
         case SDLK_F11:
             if (!ev.key.repeat) mr.toggle_fullscreen();
+            break;
+        case SDLK_O:
+            if (!ev.key.repeat) mr.toggle_osd();
             break;
         case SDLK_SPACE:
             if (!ev.key.repeat && player) player->toggle_pause();
@@ -471,7 +474,7 @@ int main(int argc, char* argv[]) {
             << L"자막: 미디어 파일과 같은 이름의 .srt/.ass/.ssa 자동 인식\n"
             << L"      내장 자막 스트림(.mkv 등)도 자동 활성화됩니다.\n\n"
             << L"키:  SPACE 일시정지  N/→ 다음  P/← 이전  R 처음\n"
-            << L"     ↑/↓ 볼륨  F11 전체화면  ESC 종료\n";
+            << L"     ↑/↓ 볼륨  O OSD  F11 전체화면  ESC 종료\n";
         bass::free();
         return 1;
     }
@@ -544,7 +547,11 @@ int main(int argc, char* argv[]) {
         if (player) player->update();
 
         // 5. 렌더링
-        mr.render(player.get(), bar_dragging);
+        const std::string cur_filename = playlist.size() > current_idx
+            ? util::wstring_to_utf8(
+                  playlist[current_idx].filename().wstring())
+            : std::string{};
+        mr.render(player.get(), cur_filename, bar_dragging);
 
         // 6. 자동 진행
         if (playlist.size() > 1) {

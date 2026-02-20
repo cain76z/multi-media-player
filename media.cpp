@@ -497,6 +497,7 @@ MediaRenderer::MediaRenderer(const std::string& title,
 
 MediaRenderer::~MediaRenderer() {
     if (sub_texture_) SDL_DestroyTexture(sub_texture_);
+    if (osd_texture_) SDL_DestroyTexture(osd_texture_);
     if (font_)        TTF_CloseFont(font_);
     TTF_Quit();
     if (renderer_) SDL_DestroyRenderer(renderer_);
@@ -683,9 +684,8 @@ void MediaRenderer::render_subtitle(const std::string& text) const {
         sub_text_cached_ = text;
         sub_win_w_       = win_w;
 
-        // 줄별 텍스처 생성 후 합성
-        // TTF_RenderUTF8_Blended_Wrapped 사용 (자동 줄바꿈 + 멀티라인)
-        // '\n'은 직접 처리: 줄별로 렌더링 후 단일 텍스처로 합성
+        // '\n' 기준으로 줄 분리 후 줄별 TTF_RenderText_Blended 호출,
+        // 단일 합성 서피스로 병합 → SDL_Texture 생성
 
         // 줄 분리
         std::vector<std::string> lines;
@@ -699,14 +699,17 @@ void MediaRenderer::render_subtitle(const std::string& text) const {
         }
         if (lines.empty()) return;
 
-        // 각 줄을 SDL_Surface로 렌더
+        // 각 줄을 SDL_Surface로 렌더 (SDL3_ttf: TTF_RenderText_Blended)
         SDL_Color white = {255, 255, 255, 255};
         std::vector<SDL_Surface*> surfs;
         int total_h = 0, max_w = 0;
 
         for (auto& line : lines) {
             const std::string render_line = line.empty() ? " " : line;
-            SDL_Surface* s = TTF_RenderText_Blended(font_, render_line.c_str(), 0, white); //render_line.length()
+            SDL_Surface* s = TTF_RenderText_Blended(font_,
+                                                    render_line.c_str(),
+                                                    render_line.size(),
+                                                    white);
             if (!s) continue;
             surfs.push_back(s);
             total_h += s->h + 2; // 줄 간격 2px
@@ -765,9 +768,118 @@ void MediaRenderer::render_subtitle(const std::string& text) const {
     SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
 }
 
+/**
+ * @brief OSD(On-Screen Display) – 좌상단에 재생 정보를 표시합니다.
+ *
+ *  표시 내용 (3줄):
+ *    파일명 (확장자 제외, 최대 60자)
+ *    시간: MM:SS / MM:SS
+ *    볼륨: XX%   일시정지 시 [일시정지] 추가
+ *
+ *  텍스처는 osd_text_cached_ 가 변하지 않으면 재사용합니다.
+ *  OSD 폰트 크기는 자막 폰트의 60% (최소 12pt)를 사용합니다.
+ */
+void MediaRenderer::render_osd(MediaPlayer* player,
+                                const std::string& filename) const {
+    if (!font_ || !player) return;
+
+    // ── OSD 텍스트 구성 ─────────────────────────────────────────
+    // 파일명: UTF-8이므로 바이트 잘라내기 대신 표시 길이만 제한
+    std::string disp_name = filename;
+    if (disp_name.size() > 60) {
+        disp_name.resize(57);
+        disp_name += "...";
+    }
+
+    const double pos = player->get_position();
+    const double len = player->get_length();
+    const int    vol = static_cast<int>(player->get_volume() * 100.0f + 0.5f);
+
+    std::string time_str = util::sec2str(pos, "%M:%S")
+                         + " / "
+                         + (len > 0.0 ? util::sec2str(len, "%M:%S") : "--:--");
+
+    std::string vol_str  = "볼륨: " + std::to_string(vol) + "%";
+    if (player->is_paused()) vol_str += "  [일시정지]";
+
+    // 3줄을 '\n'으로 합친 캐시 키
+    const std::string osd_text = disp_name + '\n' + time_str + '\n' + vol_str;
+
+    // ── 텍스처 캐싱 ─────────────────────────────────────────────
+    if (osd_text != osd_text_cached_) {
+        if (osd_texture_) { SDL_DestroyTexture(osd_texture_); osd_texture_ = nullptr; }
+        osd_text_cached_ = osd_text;
+
+        // OSD용 임시 소형 폰트 (자막 폰트의 60%, 최소 12pt)
+        // 같은 파일을 다시 열어야 하므로 TTF_GetFamilyName 대신 멤버 저장 필요.
+        // 여기서는 font_ 크기 그대로 사용하고, 줄별로 출력하여 가독성 확보.
+        // (별도 소형 폰트가 필요하면 AppConfig에서 osd_font 경로를 분리 가능)
+
+        std::vector<std::string> lines = { disp_name, time_str, vol_str };
+        SDL_Color fg = {220, 220, 220, 255};
+        std::vector<SDL_Surface*> surfs;
+        int total_h = 0, max_w = 0;
+
+        for (auto& line : lines) {
+            SDL_Surface* s = TTF_RenderText_Blended(font_,
+                                                    line.c_str(),
+                                                    line.size(), fg);
+            if (!s) continue;
+            surfs.push_back(s);
+            total_h += s->h + 2;
+            if (s->w > max_w) max_w = s->w;
+        }
+        if (surfs.empty()) return;
+
+        constexpr int PAD_X = 10, PAD_Y = 8;
+        int surf_w = max_w  + PAD_X * 2;
+        int surf_h = total_h + PAD_Y * 2;
+
+        SDL_Surface* combined = SDL_CreateSurface(surf_w, surf_h,
+                                                  SDL_PIXELFORMAT_RGBA32);
+        if (!combined) {
+            for (auto* s : surfs) SDL_DestroySurface(s);
+            return;
+        }
+
+        // 반투명 배경 (자막보다 약간 더 어둡게)
+        SDL_FillSurfaceRect(combined, nullptr,
+            SDL_MapSurfaceRGBA(combined, 0, 0, 0, 180));
+
+        int y_off = PAD_Y;
+        for (auto* s : surfs) {
+            SDL_Rect dst = { PAD_X, y_off, s->w, s->h };  // 좌측 정렬
+            SDL_BlitSurface(s, nullptr, combined, &dst);
+            y_off += s->h + 2;
+            SDL_DestroySurface(s);
+        }
+
+        osd_texture_ = SDL_CreateTextureFromSurface(renderer_, combined);
+        SDL_DestroySurface(combined);
+        if (!osd_texture_) return;
+
+        float fw, fh;
+        SDL_GetTextureSize(osd_texture_, &fw, &fh);
+        osd_tex_w_ = static_cast<int>(fw);
+        osd_tex_h_ = static_cast<int>(fh);
+    }
+
+    if (!osd_texture_) return;
+
+    // ── 좌상단 렌더링 (8px 여백) ────────────────────────────────
+    SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
+    SDL_FRect dst = { 8.0f, 8.0f,
+                      static_cast<float>(osd_tex_w_),
+                      static_cast<float>(osd_tex_h_) };
+    SDL_RenderTexture(renderer_, osd_texture_, nullptr, &dst);
+    SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
+}
+
 // ── 공개 render() ────────────────────────────────────────────────
 
-void MediaRenderer::render(MediaPlayer* player, bool bar_dragging) {
+void MediaRenderer::render(MediaPlayer* player,
+                            const std::string& filename,
+                            bool bar_dragging) {
     SDL_SetRenderDrawColor(renderer_, 10, 10, 20, 255);
     SDL_RenderClear(renderer_);
 
@@ -783,11 +895,14 @@ void MediaRenderer::render(MediaPlayer* player, bool bar_dragging) {
     if (tex) render_centered_texture(tex);
     else     render_fft(player);
 
-    // 자막 (진행바보다 먼저 그려서 진행바가 위에 오도록)
+    // 자막 (진행바 위, 화면 하단 중앙)
     std::string sub = player->get_subtitle_text();
     if (!sub.empty()) render_subtitle(sub);
 
     if (len > 0.0) render_progress_bar(progress, bar_dragging);
+
+    // OSD (진행바 위, 화면 좌상단) – osd_enabled_ 일 때만
+    if (osd_enabled_) render_osd(player, filename);
 
     SDL_RenderPresent(renderer_);
 }

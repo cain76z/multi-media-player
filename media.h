@@ -319,9 +319,13 @@ public:
                   int font_size = 28);
     ~MediaRenderer();
 
-    void render(MediaPlayer* player, bool bar_dragging = false);
+    void render(MediaPlayer* player,
+                const std::string& filename = {},
+                bool bar_dragging = false);
 
     void toggle_fullscreen();
+    void toggle_osd() { osd_enabled_ = !osd_enabled_; }  ///< O 키: OSD 켜고 끄기
+    bool is_osd_enabled() const { return osd_enabled_; }
     void set_title(const std::string& title);
 
     bool  is_over_bar(float mouse_y)    const;
@@ -334,25 +338,37 @@ public:
 
 private:
     void load_font(const std::string& font_path, int font_size);
-    static std::string find_system_font(); ///< 플랫폼별 폴백 폰트 탐색
+    static std::string find_system_font();
 
     void render_centered_texture(SDL_Texture* tex) const;
     void render_progress_bar(float progress, bool highlighted) const;
     void render_fft(MediaPlayer* player) const;
     void render_subtitle(const std::string& text) const;
+    void render_osd(MediaPlayer* player,
+                    const std::string& filename) const; ///< 좌상단 정보 오버레이
 
     SDL_Window*   window_     = nullptr;
     SDL_Renderer* renderer_   = nullptr;
     bool          fullscreen_ = false;
+    bool          osd_enabled_= false;  ///< O 키로 토글
 
-    // 자막 렌더링
-    TTF_Font* font_         = nullptr;
-    int       font_size_    = 28;
+    // 폰트 (자막 + OSD 공용)
+    TTF_Font* font_      = nullptr;
+    int       font_size_ = 28;
 
-    // 자막 텍스처 캐싱 (텍스트/창 너비가 바뀔 때만 재생성)
-    mutable SDL_Texture* sub_texture_  = nullptr;
+    // 자막 텍스처 캐싱
+    mutable SDL_Texture* sub_texture_     = nullptr;
     mutable std::string  sub_text_cached_;
-    mutable int          sub_tex_w_    = 0;
-    mutable int          sub_tex_h_    = 0;
-    mutable int          sub_win_w_    = 0; ///< 텍스처 생성 시점의 창 너비 (wrap 기준)
+    mutable int          sub_tex_w_       = 0;
+    mutable int          sub_tex_h_       = 0;
+    mutable int          sub_win_w_       = 0;
+
+    // OSD 텍스처 캐싱 (1초 단위 갱신)
+    mutable SDL_Texture* osd_texture_     = nullptr;
+    mutable std::string  osd_text_cached_;
+    mutable int          osd_tex_w_       = 0;
+    mutable int          osd_tex_h_       = 0;
+
+    // render() 호출 시 전달받은 파일명 (OSD 표시용)
+    std::string current_filename_;
 };
