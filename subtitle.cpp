@@ -3,7 +3,10 @@
  * @brief SubtitleTrack 구현 – SRT / ASS / SSA / FFmpeg 내장 자막
  */
 
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+
 #include "subtitle.h"
 
 #include <algorithm>
@@ -15,17 +18,27 @@
 //  시간 파싱
 // ════════════════════════════════════════════════════════════════════
 
-/// SRT 타임코드: "01:23:45,678" → 초
+/**
+ * @brief SRT 타임코드 "01:23:45,678" → 초 단위 실수로 변환
+ * @param ts 타임코드 문자열
+ * @return 초 단위 시간
+ */
 double SubtitleTrack::parse_srt_time(const std::string& ts) {
     int h = 0, m = 0, s = 0, ms = 0;
-    std::sscanf(ts.c_str(), "%d:%d:%d,%d", &h, &m, &s, &ms);
+    if (std::sscanf(ts.c_str(), "%d:%d:%d,%d", &h, &m, &s, &ms) != 4)
+        return 0.0;
     return h * 3600.0 + m * 60.0 + s + ms / 1000.0;
 }
 
-/// ASS 타임코드: "1:23:45.67" → 초 (centiseconds)
+/**
+ * @brief ASS 타임코드 "1:23:45.67" (centiseconds) → 초 단위 실수로 변환
+ * @param ts 타임코드 문자열
+ * @return 초 단위 시간
+ */
 double SubtitleTrack::parse_ass_time(const std::string& ts) {
     int h = 0, m = 0, s = 0, cs = 0;
-    std::sscanf(ts.c_str(), "%d:%d:%d.%d", &h, &m, &s, &cs);
+    if (std::sscanf(ts.c_str(), "%d:%d:%d.%d", &h, &m, &s, &cs) != 4)
+        return 0.0;
     return h * 3600.0 + m * 60.0 + s + cs / 100.0;
 }
 
@@ -33,7 +46,11 @@ double SubtitleTrack::parse_ass_time(const std::string& ts) {
 //  텍스트 정제
 // ════════════════════════════════════════════════════════════════════
 
-/// ASS 오버라이드 코드 제거: {\an8}, {\pos(…)} 등 { } 블록 전체 제거
+/**
+ * @brief ASS/SSA 오버라이드 코드 제거: { ... } 블록 전체 제거
+ * @param s 원시 문자열
+ * @return 태그 제거된 문자열
+ */
 std::string SubtitleTrack::strip_ass_tags(const std::string& s) {
     std::string result;
     result.reserve(s.size());
@@ -46,7 +63,11 @@ std::string SubtitleTrack::strip_ass_tags(const std::string& s) {
     return result;
 }
 
-/// HTML 태그 제거: <i>, <b>, <font …> 등 < > 블록 전체 제거
+/**
+ * @brief HTML 태그 제거: < ... > 블록 전체 제거
+ * @param s 원시 문자열
+ * @return 태그 제거된 문자열
+ */
 std::string SubtitleTrack::strip_html_tags(const std::string& s) {
     std::string result;
     result.reserve(s.size());
@@ -59,7 +80,14 @@ std::string SubtitleTrack::strip_html_tags(const std::string& s) {
     return result;
 }
 
-/// 태그 제거 + \N / \n → '\n' + 앞뒤 공백 트리밍
+/**
+ * @brief 최종 텍스트 정제:
+ *        - ASS/HTML 태그 제거
+ *        - \N, \n 이스케이프를 실제 줄바꿈('\n')으로 변환
+ *        - 앞뒤 공백/줄바꿈 문자 제거
+ * @param s 원시 텍스트
+ * @return 화면 표시용 깨끗한 텍스트
+ */
 std::string SubtitleTrack::clean_text(const std::string& s) {
     std::string r = strip_ass_tags(strip_html_tags(s));
 
@@ -88,6 +116,11 @@ std::string SubtitleTrack::clean_text(const std::string& s) {
 //  SRT 로더
 // ════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief SRT 파일을 파싱하여 entries_에 추가
+ * @param path SRT 파일 경로
+ * @return 최소 하나 이상의 항목을 읽었으면 true
+ */
 bool SubtitleTrack::load_srt(const std::filesystem::path& path) {
     std::ifstream ifs(path);
     if (!ifs.is_open()) return false;
@@ -108,6 +141,7 @@ bool SubtitleTrack::load_srt(const std::filesystem::path& path) {
     std::string  text_buf;
     bool         in_entry = false;
 
+    // 현재까지 누적된 자막 항목을 entries_에 추가하는 람다
     auto flush = [&]() {
         if (in_entry && !text_buf.empty()) {
             cur.text = clean_text(text_buf);
@@ -132,7 +166,8 @@ bool SubtitleTrack::load_srt(const std::filesystem::path& path) {
 
         // 시퀀스 번호(숫자만) → 새 항목 시작
         if (!line.empty() &&
-            std::all_of(line.begin(), line.end(), ::isdigit))
+            std::all_of(line.begin(), line.end(),
+                [](unsigned char c){ return std::isdigit(c); }))
         {
             flush();
             in_entry = true;
@@ -151,6 +186,7 @@ bool SubtitleTrack::load_srt(const std::filesystem::path& path) {
             trim_str(s_str); trim_str(e_str);
             cur.start = parse_srt_time(s_str);
             cur.end   = parse_srt_time(e_str);
+            if (cur.end < cur.start) std::swap(cur.start, cur.end);
             continue;
         }
 
@@ -169,6 +205,11 @@ bool SubtitleTrack::load_srt(const std::filesystem::path& path) {
 //  ASS / SSA 로더
 // ════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief ASS 또는 SSA 파일을 파싱하여 entries_에 추가
+ * @param path ASS/SSA 파일 경로
+ * @return 최소 하나 이상의 항목을 읽었으면 true
+ */
 bool SubtitleTrack::load_ass(const std::filesystem::path& path) {
     std::ifstream ifs(path);
     if (!ifs.is_open()) return false;
@@ -249,6 +290,7 @@ bool SubtitleTrack::load_ass(const std::filesystem::path& path) {
 
         double start = parse_ass_time(fields[1]);
         double end   = parse_ass_time(fields[2]);
+        if (end < start) std::swap(start, end);
         std::string text = clean_text(fields[text_col_idx]);
 
         if (!text.empty())
@@ -264,6 +306,11 @@ bool SubtitleTrack::load_ass(const std::filesystem::path& path) {
 //  외부 파일 자동 탐색
 // ════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 미디어 파일과 같은 디렉터리에서 같은 이름의 .srt/.ass/.ssa 파일을 찾아 로드
+ * @param media_path 미디어 파일 전체 경로
+ * @return 성공적으로 로드한 경우 true
+ */
 bool SubtitleTrack::load_file(const std::filesystem::path& media_path) {
     const auto base = media_path.parent_path() / media_path.stem();
 
@@ -283,12 +330,21 @@ bool SubtitleTrack::load_file(const std::filesystem::path& media_path) {
 //  FFmpeg 내장 자막 추가
 // ════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief FFmpeg 디코딩 스레드에서 호출하여 내장 자막 항목을 추가
+ * @param start    시작 시간 (초)
+ * @param end      종료 시간 (초)
+ * @param raw_text AVSubtitle에서 추출한 원시 텍스트
+ *
+ * 시간순 정렬을 유지하기 위해 lower_bound로 삽입 위치를 찾아 삽입한다.
+ */
 void SubtitleTrack::add_ffmpeg_entry(double start, double end,
                                      const std::string& raw_text) {
     std::string text = clean_text(raw_text);
     if (text.empty()) return;
 
-    // 시간순 삽입 (decode_loop는 PTS 순서로 패킷을 처리하므로 거의 정렬 상태)
+    if (end < start) std::swap(start, end);
+
     SubtitleEntry entry{start, end, std::move(text)};
     auto it = std::lower_bound(entries_.begin(), entries_.end(), entry,
         [](const SubtitleEntry& a, const SubtitleEntry& b) {
@@ -297,6 +353,9 @@ void SubtitleTrack::add_ffmpeg_entry(double start, double end,
     entries_.insert(it, std::move(entry));
 }
 
+/**
+ * @brief 모든 항목을 시작 시간 기준으로 정렬
+ */
 void SubtitleTrack::sort_entries() {
     std::sort(entries_.begin(), entries_.end(),
         [](const SubtitleEntry& a, const SubtitleEntry& b) {
@@ -308,6 +367,14 @@ void SubtitleTrack::sort_entries() {
 //  현재 자막 조회 (O(log n) 이진 탐색)
 // ════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 주어진 시간에 표시되어야 할 자막 텍스트 반환
+ * @param time_sec 현재 시간 (초)
+ * @return 자막 텍스트 (없으면 빈 문자열)
+ *
+ *  upper_bound로 start > time_sec 인 첫 항목을 찾고,
+ *  그 직전 항목이 time_sec < end 조건을 만족하면 해당 텍스트 반환.
+ */
 const std::string& SubtitleTrack::get_active(double time_sec) const {
     if (entries_.empty()) return empty_str_;
 

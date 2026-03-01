@@ -7,7 +7,8 @@
  *  교체 시:  player.reset() (소멸자가 stop() 호출) → 새 플레이어 생성 → play()
  */
 
-#include "media.h"
+#include "mediaplayer.h"
+#include "mediarender.h"
 #include "args.hpp"
 #include "fnutil.hpp"
 #include "util.hpp"
@@ -34,6 +35,9 @@
 //  유틸리티
 // ════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 실행 파일이 위치한 디렉터리 경로 반환 (와이드 문자열)
+ */
 static std::wstring get_exe_dir() {
 #ifdef _WIN32
     wchar_t buf[MAX_PATH];
@@ -55,6 +59,9 @@ static std::wstring get_exe_dir() {
 #endif
 }
 
+/**
+ * @brief 문자열을 숫자로 안전하게 파싱 (실패 시 fallback 반환)
+ */
 template<typename T>
 static T safe_parse(const std::string& s, T fallback) {
     try {
@@ -64,6 +71,10 @@ static T safe_parse(const std::string& s, T fallback) {
     return fallback;
 }
 
+/**
+ * @brief "WxH" 또는 "W,H" 형태의 문자열을 파싱하여 a,b 에 저장
+ * @return 파싱 성공 시 true
+ */
 static bool parse_pair(const std::wstring& s, int& a, int& b) {
     for (wchar_t sep : { L'x', L',' }) {
         size_t pos = s.find(sep);
@@ -75,6 +86,9 @@ static bool parse_pair(const std::wstring& s, int& a, int& b) {
     return false;
 }
 
+/**
+ * @brief "--geometry WxH+X+Y" 형식 파싱
+ */
 static void parse_geometry(const std::wstring& s, int& w, int& h, int& x, int& y) {
     size_t plus = s.find(L'+');
     std::wstring wh = (plus != std::wstring::npos) ? s.substr(0, plus) : s;
@@ -86,6 +100,9 @@ static void parse_geometry(const std::wstring& s, int& w, int& h, int& x, int& y
     y = safe_parse<int>(util::wstring_to_utf8(s.substr(plus2 + 1)), y);
 }
 
+/**
+ * @brief 쉼표로 구분된 확장자 목록을 파싱하여 소문자 집합으로 반환
+ */
 static std::unordered_set<std::wstring> parse_ext_list(const std::wstring& str) {
     std::unordered_set<std::wstring> exts;
     auto push = [&](std::wstring token) {
@@ -109,6 +126,10 @@ static std::unordered_set<std::wstring> parse_ext_list(const std::wstring& str) 
 //  설정 로딩
 // ════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief mp.conf 파일을 읽어 키-값 쌍으로 반환
+ * @param dir 실행 파일 디렉터리
+ */
 static std::map<std::wstring, std::wstring> load_mp_conf(const std::wstring& dir) {
     std::map<std::wstring, std::wstring> conf;
     std::ifstream ifs(util::wstring_to_utf8(dir + L"mp.conf"));
@@ -151,6 +172,9 @@ static std::map<std::wstring, std::wstring> load_mp_conf(const std::wstring& dir
     return conf;
 }
 
+/**
+ * @brief mp.conf 와 명령줄 인자를 병합하여 AppConfig 생성
+ */
 static AppConfig load_config(const Args& args,
                              const std::map<std::wstring, std::wstring>& conf) {
     AppConfig cfg;
@@ -252,7 +276,7 @@ static std::unique_ptr<MediaPlayer> create_player(
     }
 
     // ── 오디오 (BASS) ─────────────────────────────────────────────
-    {
+    if (cfg.audio_exts.count(ext)) {
         auto p = std::make_unique<AudioPlayer>(path.wstring(), cfg.volume);
         if (!p->is_valid()) {
             std::wcout << L"[오디오 로드 실패] " << path.wstring() << L"\n";
@@ -263,12 +287,18 @@ static std::unique_ptr<MediaPlayer> create_player(
                    << L" (" << util::to_wstring(util::sec2str(p->get_length())) << L")\n";
         return p;
     }
+
+    std::wcout << L"[스킵] 지원하지 않는 파일 형식: " << path.wstring() << L"\n";
+    return nullptr;
 }
 
 // ════════════════════════════════════════════════════════════════════
 //  헬퍼
 // ════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 창 제목을 "MP - 파일명 (인덱스/전체)" 형식으로 업데이트
+ */
 static void update_title(MediaRenderer& mr,
                          const std::filesystem::path& path,
                          size_t idx, size_t total)
@@ -280,7 +310,9 @@ static void update_title(MediaRenderer& mr,
     mr.set_title(util::wstring_to_utf8(t));
 }
 
-// 플레이어 교체: 기존 stop() → 새 생성 → play()
+/**
+ * @brief 플레이어 교체: 기존 stop() → 새 생성 → play()
+ */
 static void load_media(std::unique_ptr<MediaPlayer>& player,
                        const std::filesystem::path&  path,
                        const AppConfig&              cfg,
@@ -296,6 +328,16 @@ static void load_media(std::unique_ptr<MediaPlayer>& player,
 //  이벤트 처리
 // ════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief SDL 이벤트 처리
+ * @param mr           MediaRenderer 참조
+ * @param player       현재 플레이어
+ * @param cfg          설정 (볼륨 변경 반영)
+ * @param advance      출력: 다음/이전 파일 이동 요청 (+1/-1)
+ * @param reload       출력: 재로드 요청 (R 키)
+ * @param bar_dragging 출력: 진행바 드래그 상태
+ * @return false면 종료 요청 (ESC 또는 윈도우 닫기)
+ */
 static bool handle_events(MediaRenderer&  mr,
                           MediaPlayer*    player,
                           AppConfig&      cfg,
@@ -400,6 +442,13 @@ static bool handle_events(MediaRenderer&  mr,
 //  자동 진행 판단
 // ════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 플레이어 종료 또는 짧은 오디오 반복 여부에 따라 자동 전환 필요성을 판단
+ * @param player         현재 플레이어
+ * @param cfg            설정
+ * @param auto_next_tick 다음 자동 전환 예정 시각 (ms) (출력/입력)
+ * @return true면 즉시 다음 파일로 전환해야 함
+ */
 static bool check_auto_advance(MediaPlayer*     player,
                                const AppConfig& cfg,
                                Uint64&          auto_next_tick)
@@ -435,6 +484,9 @@ static bool check_auto_advance(MediaPlayer*     player,
 //  MAIN
 // ════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 프로그램 진입점
+ */
 int main(int argc, char* argv[]) {
     util::set_console_encoding(util::codepage::UTF8);
     std::wcout << L"🎵 MP Media Player v3.5\n\n";
@@ -564,7 +616,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        SDL_Delay(1);
+        SDL_Delay(8);  // ~120fps 상한, CPU 과점유 방지
     }
 
     // 정리 – player 소멸자가 stop() + join 자동 처리
